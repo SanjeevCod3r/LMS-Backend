@@ -4,7 +4,7 @@ import { generateToken } from '../middlewares/auth.js';
 // Register new user
 export const register = async (req, res) => {
     try {
-        const { name, email, password, role = 'student' } = req.body;
+        const { name, email, password } = req.body;
 
         // Validation
         if (!name || !email || !password) {
@@ -23,12 +23,18 @@ export const register = async (req, res) => {
             });
         }
 
+        let assignedRole = "student";
+        
+        if (email === process.env.EDUCATOR_EMAIL) {
+            assignedRole = "educator";
+        }
+
         // Create new user
         const user = new User({
             name,
             email,
             password,
-            role
+            role: assignedRole
         });
 
         await user.save();
