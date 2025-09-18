@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import 'dotenv/config'
 import connectDB from './configs/mongodb.js';
-import { stripeWebhooks } from './controllers/webhooks.js';
+import { razorpayWebhook } from './controllers/webhooks.js';
 import educatorRouter from './routes/educatorRoutes.js';
 import connectCloudinay from './configs/cloudinary.js';
 import courseRouter from './routes/courseRoute.js';
@@ -29,7 +29,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/educator', educatorRouter);
 app.use('/api/course', courseRouter);
 app.use('/api/user', userRouter);
-app.post('/stripe', express.raw({type: 'application/json'}), stripeWebhooks);
+app.post('/razorpay-webhook', express.raw({type: 'application/json'}), razorpayWebhook);
 
 
 

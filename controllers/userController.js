@@ -1,8 +1,9 @@
-import Stripe from "stripe"
+import Razorpay from "razorpay"
 import Course from "../models/Course.js"
 import { Purchase } from "../models/Purchase.js"
 import User from "../models/User.js"
 import { CourseProgress } from "../models/CourseProgress.js"
+import crypto from "crypto"
 
 // Get users data
 export const getUserData = async(req,res)=>{
@@ -44,54 +45,147 @@ export const purchaseCourse = async (req,res) => {
         const userId = req.user._id;
 
         const userData = await User.findById(userId)
-
         const courseData = await Course.findById(courseId)
-        if(!userData || !courseData)
-        {
-            res.json({success: false, message: "Data Not Found"})
+        
+        if(!userData || !courseData) {
+            return res.json({success: false, message: "Data Not Found"})
         }
 
+        // Check if user is already enrolled
+        if(userData.enrolledCourses.includes(courseId)) {
+            return res.json({success: false, message: "Already enrolled in this course"})
+        }
+
+        const finalPrice = (courseData.coursePrice - courseData.discount * courseData.coursePrice / 100).toFixed(2);
+
+        // Handle free courses
+        if(parseFloat(finalPrice) === 0.00) {
+            // Directly enroll user in free course
+            userData.enrolledCourses.push(courseId);
+            courseData.enrolledStudents.push(userId);
+            
+            await userData.save();
+            await courseData.save();
+
+            // Create a purchase record for free course
+            await Purchase.create({
+                courseId: courseData._id,
+                userId,
+                amount: 0,
+                paymentStatus: 'completed'
+            });
+
+            return res.json({
+                success: true, 
+                message: "Successfully enrolled in free course!",
+                redirect: "/my-enrollments"
+            });
+        }
+
+        // Handle paid courses with Razorpay
         const purchaseData = {
             courseId: courseData._id,
             userId,
-            amount: (courseData.coursePrice - courseData.discount * courseData.coursePrice / 100).toFixed(2),
+            amount: finalPrice,
         }
 
         const newPurchase = await Purchase.create(purchaseData);
 
-        // stripe gateway initialize
-        const stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY)
-        const currency = process.env.CURRENCY.toLowerCase();
-        
-        // creating line items to for stripe
-        const line_items = [{
-            price_data:{
-                currency,
-                product_data:{
-                    name: courseData.courseTitle
-                },
-                unit_amount: Math.floor( newPurchase.amount ) * 100
-            },
-            quantity: 1
-        }]
+        // Initialize Razorpay instance
+        const razorpayInstance = new Razorpay({
+            key_id: process.env.RAZORPAY_KEY_ID,
+            key_secret: process.env.RAZORPAY_KEY_SECRET
+        });
 
-        const session = await stripeInstance.checkout.sessions.create({
-            success_url: `${origin}/loading/my-enrollments`,
-            cancel_url: `${origin}/`,
-            line_items: line_items,
-            mode: 'payment',
-            metadata: {
-                purchaseId: newPurchase._id.toString()
+        // Create Razorpay order
+        const options = {
+            amount: Math.round(parseFloat(finalPrice) * 100), // Amount in paise (smallest currency unit)
+            currency: process.env.CURRENCY || 'INR',
+            receipt: `receipt_${newPurchase._id}`,
+            notes: {
+                courseId: courseData._id.toString(),
+                userId: userId.toString(),
+                purchaseId: newPurchase._id.toString(),
+                courseName: courseData.courseTitle
             }
+        };
+
+        const razorpayOrder = await razorpayInstance.orders.create(options);
+
+        // Update purchase with Razorpay order ID
+        newPurchase.razorpayOrderId = razorpayOrder.id;
+        await newPurchase.save();
+
+        res.json({
+            success: true,
+            orderId: razorpayOrder.id,
+            amount: razorpayOrder.amount,
+            currency: razorpayOrder.currency,
+            courseName: courseData.courseTitle,
+            purchaseId: newPurchase._id
         })
-
-        res.json({success: true, session_url: session.url})
-
 
     } catch (error) {
         res.json({success: false, message:error.message})
     }
 }
+
+// Verify Razorpay payment
+export const verifyRazorpayPayment = async (req, res) => {
+    try {
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature, purchaseId } = req.body;
+
+        // Create signature for verification
+        const body = razorpay_order_id + "|" + razorpay_payment_id;
+        const expectedSignature = crypto
+            .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+            .update(body.toString())
+            .digest("hex");
+
+        if (expectedSignature !== razorpay_signature) {
+            return res.json({ success: false, message: "Payment verification failed" });
+        }
+
+        // Find the purchase record
+        const purchaseData = await Purchase.findById(purchaseId);
+        if (!purchaseData) {
+            return res.json({ success: false, message: "Purchase record not found" });
+        }
+
+        // Get user and course data
+        const userData = await User.findById(purchaseData.userId);
+        const courseData = await Course.findById(purchaseData.courseId);
+
+        if (!userData || !courseData) {
+            return res.json({ success: false, message: "User or Course not found" });
+        }
+
+        // Update purchase record
+        purchaseData.paymentStatus = 'completed';
+        purchaseData.razorpayPaymentId = razorpay_payment_id;
+        purchaseData.razorpaySignature = razorpay_signature;
+        await purchaseData.save();
+
+        // Enroll user in course
+        if (!userData.enrolledCourses.includes(courseData._id)) {
+            userData.enrolledCourses.push(courseData._id);
+            await userData.save();
+        }
+
+        if (!courseData.enrolledStudents.includes(userData._id)) {
+            courseData.enrolledStudents.push(userData._id);
+            await courseData.save();
+        }
+
+        res.json({
+            success: true,
+            message: "Payment verified and enrollment completed successfully!"
+        });
+
+    } catch (error) {
+        res.json({ success: false, message: error.message });
+    }
+};
 
 // Update user Course progress
 
